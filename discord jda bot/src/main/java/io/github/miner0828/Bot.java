@@ -31,33 +31,43 @@ import org.javacord.api.listener.message.MessageCreateListener;
 import org.javacord.api.listener.message.reaction.ReactionAddListener;
 
 public class Bot {
-	private static final String TOKEN = "";
-	private static final String API_KEY = "";
 	private static Map<String, String> prefixes = new Hashtable<String, String>();
+	private static Map<String, Double> balances = new Hashtable<String, Double>();
+	private static Map<String, Long> dailyTimestamps = new Hashtable<String, Long>();
+	private static Map<String, ArrayList<String>> stockOwnerships = new Hashtable<String, ArrayList<String>>();
 	private static boolean shuttingDown = false;
 
 	public static void main(String[] args) {
+		readFileToDict("prefixes.settings", prefixes, String.class);
+		readFileToDict("balances.settings", balances, Double.class);
+		readFileToDict("dailyTimestamps.settings", dailyTimestamps, Long.class);
 		try {
-			BufferedReader br = new BufferedReader(new FileReader(new File("servers.settings")));
-			String key = br.readLine(), value;
-			while (key != null) {
-				value = br.readLine();
-				prefixes.put(key, value);
-				key = br.readLine();
+			BufferedReader br = new BufferedReader(new FileReader(new File("stockOwnerships.settings")));
+			String playerID;
+			int length;
+			while ((playerID=br.readLine())!= null) {
+				length = Integer.parseInt(br.readLine());
+				stockOwnerships.put(playerID, new ArrayList<String>());
+				for (int i=0; i<length;i++) {
+					stockOwnerships.get(playerID).add(br.readLine());
+				}
+				playerID = br.readLine();
 			}
 			br.close();
 		} catch (IOException e1) {
-			System.err.println("Error while reading from settings file");
+			System.err.println("Error while reading from settings files");
 			e1.printStackTrace();
 			System.exit(1);
 		}
 		
-		DiscordApi api = new DiscordApiBuilder().setToken(Bot.TOKEN).login().join();
+		DiscordApi api = new DiscordApiBuilder().setToken(Security.TOKEN).login().join();
 		System.out.println("Invite URL " + api.createBotInvite(Permissions.fromBitmask(67584)));
 		
 		api.addMessageCreateListener(new MessageCreateListener() {
 			@Override
 			public void onMessageCreate(MessageCreateEvent event) {
+				if (event.getMessage().getAuthor().isYourself()) return;
+				
 				String messageText = event.getMessageContent();
 				Optional<Server> server = event.getServer();
 				String prefix;
@@ -76,9 +86,15 @@ public class Bot {
 								+ "Commands:\n"
 								+ "    help: This. Aliases: helpme, ?\n"
 								+ "    prefix: Set bot prefix (default '+'). Aliases: setprefix\n"
-								+ "    stocks: Main command for stocks. Aliases: stock\n"
+								+ "    stocks: Main command for stocks. Aliases: stock, stonks\n"
 								+ "        get: Get info about a stock. Aliases: info\n"
-								+ "        list: Get a list of all supported US stocks and stock symbols. Aliases: listall, getall"
+								+ "        list: Get a list of all supported US stocks and stock symbols. Aliases: listall, getall\n"
+								+ "        buy: Buy stock shares (stock buy <stock symbol> <amount>). Aliases: buystock\n"
+								+ "        sell: Sell stock shares (stock sell <stock symbol> <amount>). Aliases: sellstock\n"
+								+ "        mystock: List all the shares you own. Aliases: showstock, stocklist"
+								+ "    balance: View your own or another player's balance. Aliases: bal, money\n"
+								+ "    baltop: View the ranked list of all balances. Aliases: balancetop, leaderboard, topmoney\n"
+								+ "    daily: Claim your daily money of $1000 (cooldown 24h). Aliases: allowance, freemoney"
 								+ "```");
 						break;
 					case "prefix":
@@ -111,6 +127,7 @@ public class Bot {
 						break;
 					case "stock":
 					case "stocks":
+					case "stonks":
 						if (messageText.toLowerCase().substring(prefix.length()).split(" ").length==1) {
 							event.getChannel().sendMessage("No sub-command given! Possible subcommands: get");
 						} else {
@@ -152,32 +169,100 @@ public class Bot {
 								if (messageText.toLowerCase().substring(prefix.length()).split(" ").length>2) {
 									String exchange = messageText.toUpperCase().split(" ")[messageText.split(" ").length-1];
 									String list = getApiJson("https://finnhub-realtime-stock-price.p.rapidapi.com/stock/symbol", exchange, event.getChannel(), "exchange");
+									if (list.contains("[]")) {
+										event.getChannel().sendMessage("Invalid exchange");
+										return;
+									}
 									String[] names = jsonLookupParserAll(list, "description", false);
 									String[] symbols = jsonLookupParserAll(list, "symbol", false);
-									EmbedBuilder eb = new EmbedBuilder();
-									eb.setTitle("All supported " + exchange + " stocks");
-									eb.setColor(Color.BLUE);
-									eb.setFooter("Stock API provided by Finnhub and RapidAPI");
-									eb.setAuthor("Page 01");
-									StringBuilder s = new StringBuilder();
-									for (int i=0;i<50;i++) {
-										s.append(names[i] + " | " + symbols[i] + "\n");
-									}
-									eb.setDescription(new String(s));
-									System.out.println(new String(s));
 									try {
-										event.getMessageAuthor().asUser().get().openPrivateChannel().get().sendMessage(eb).get().addReactions("⬅️", "➡️");
+										event.getMessageAuthor().asUser().get().openPrivateChannel().get().sendMessage(createEmbedList(1, "All supported " + exchange + " stocks", names, symbols)).get().addReactions("⬅️", "➡️");
 									} catch (InterruptedException | ExecutionException e) {
 										event.getChannel().sendMessage("An error occured while sending the DM, please try again.");
 										e.printStackTrace();
 									}
-									eb = null;
 								} else event.getChannel().sendMessage("No exchange specified!");
+								break;
+							case "buy":
+							case "buystock":
+								if (messageText.toLowerCase().substring(prefix.length()).split(" ").length>3) {
+									String symbol = messageText.toUpperCase().substring(prefix.length()).split(" ")[2];
+									String amountAsString = messageText.toLowerCase().substring(prefix.length()).split(" ")[3];
+									int amount;
+									try {
+										amount = Integer.parseInt(amountAsString);
+									} catch (NumberFormatException e) {
+										event.getChannel().sendMessage("Invalid amount");
+										return;
+									}
+									String quoteOutput = getApiJson("https://finnhub-realtime-stock-price.p.rapidapi.com/quote", symbol, event.getChannel(), "symbol");
+									String playerID = event.getMessage().getAuthor().getIdAsString();
+									if (quoteOutput.contains("Symbol not supported")) {
+										event.getChannel().sendMessage("Invalid stock symbol " + symbol);
+										return;
+									}
+									double totalCost = Double.parseDouble(jsonLookupParser(quoteOutput, "c", false)) * amount;
+									if (!balances.containsKey(playerID)) event.getChannel().sendMessage("Not enough money!");
+									else if (balances.get(playerID) > totalCost){
+										balances.replace(playerID, (balances.get(playerID)-totalCost));
+										if (!stockOwnerships.containsKey(playerID)) stockOwnerships.put(playerID, new ArrayList<String>());
+										for (int i=0; i<amount; i++) {
+											stockOwnerships.get(playerID).add(symbol);
+										}
+										event.getChannel().sendMessage("Successfully bought " + amount + " shares of " + symbol + " for " + NumberFormat.getCurrencyInstance().format(totalCost));
+									} else event.getChannel().sendMessage("Not enough money!");
+								} else event.getChannel().sendMessage("Not enough parameters! Usage: stock buy <stock> <amount>");
+								break;
+							case "sell":
+							case "sellstock":
+								
+								break;
+							case "mystock":
+							case "showstock":
+							case "stocklist":
+								
 								break;
 							}
 						break;
 						//maybe add a +notes or +remindme or something
 						}
+					case "balance":
+					case "bal":
+					case "money":
+						NumberFormat formatter = NumberFormat.getCurrencyInstance();
+						String playerID = "";
+						if (event.getMessage().getMentionedUsers().size()>0) {
+							if (event.getMessage().getMentionedUsers().get(0).isYourself()) event.getChannel().sendMessage("$∞");
+							else playerID = event.getMessage().getMentionedUsers().get(0).getIdAsString();
+						} else playerID = event.getMessage().getAuthor().getIdAsString();
+						if (balances.containsKey(playerID)) event.getChannel().sendMessage("<@" + playerID  + ">'s balance is " + formatter.format(balances.get(playerID)));
+						else if (playerID.length() > 0) event.getChannel().sendMessage("User does not have a balance.");
+						formatter = null;
+						break;
+					case "daily":
+					case "allowance":
+					case "freemoney":
+						String playerID2 = event.getMessage().getAuthor().getIdAsString();
+						NumberFormat formatter2 = NumberFormat.getCurrencyInstance();
+						if (dailyTimestamps.containsKey(playerID2) && dailyTimestamps.get(playerID2)<(System.currentTimeMillis()-86400000L)) {
+							if (balances.containsKey(playerID2)) balances.replace(playerID2, (balances.get(playerID2)+1000.00));
+							else balances.put(playerID2, 1000.00);
+							dailyTimestamps.replace(playerID2, System.currentTimeMillis());
+						} else if (!dailyTimestamps.containsKey(playerID2)) {
+							if (balances.containsKey(playerID2)) balances.replace(playerID2, (balances.get(playerID2)+1000.00));
+							else balances.put(playerID2, 1000.00);
+							dailyTimestamps.put(playerID2, System.currentTimeMillis());
+						} else {
+							long msToGo = dailyTimestamps.get(playerID2) - (System.currentTimeMillis()-86400000L);
+							int h = (int) ((msToGo / (1000 * 60 * 60)) % 24);
+							int m = (int) ((msToGo / (1000 * 60)) % 60);
+							int s = (int) ((msToGo / 1000) % 60);
+							event.getChannel().sendMessage(String.format("You still have %02d hours, %02d minutes, and %02d seconds before you can claim your next daily!", h, m, s));
+							return;
+						}
+						event.getChannel().sendMessage("Daily $1000 given! You now have " + formatter2.format(balances.get(playerID2)) + "!");
+						formatter2 = null;
+						break;
 					}
 				}
 				
@@ -199,38 +284,25 @@ public class Bot {
 					return;
 				}
 				
-				System.out.println("contains all supported?" + event.getMessageContent().get().contains("All supported"));
-				System.out.println("page num: " + botMessage.getEmbeds().get(0).getAuthor().get().getName());
-				
 				if (botMessage.getAuthor().isYourself() && botMessage.getEmbeds().get(0).getTitle().get().contains("All supported")) {
 					int page = Integer.parseInt(botMessage.getEmbeds().get(0).getAuthor().get().getName().substring(5, 7));
 					String exchange = botMessage.getEmbeds().get(0).getTitle().get().split(" ")[2];
-					System.out.println("exchange: " + exchange);
 					String list = getApiJson("https://finnhub-realtime-stock-price.p.rapidapi.com/stock/symbol", exchange, event.getChannel(), "exchange");
 					String[] names = jsonLookupParserAll(list, "description", false);
 					String[] symbols = jsonLookupParserAll(list, "symbol", false);
 					
-					//System.out.println("list: " + list);
 					if (emoji.equalsEmoji("⬅️") && page>1) page--;
 					else if (emoji.equalsEmoji("➡️") && page<(names.length/50)) page++;
 					else return;
-					System.out.println("page " + page);
 					
-					EmbedBuilder eb = new EmbedBuilder();
-					eb.setTitle("All supported " + exchange + " stocks");
-					eb.setColor(Color.BLUE);
-					eb.setFooter("Stock API provided by Finnhub and RapidAPI");
-					eb.setAuthor("Page " + page);
-					if (page < 10) eb.setAuthor("Page 0" + page);
-					StringBuilder s = new StringBuilder();
-					for (int i=0*page;i<50*page;i++) {
-						s.append(names[i] + " | " + symbols[i] + "\n");
-					}
-					eb.setDescription(new String(s));
 					botMessage.delete("Page change");
-					event.getChannel().sendMessage("EEEEE");
-					event.getChannel().sendMessage(eb);
-					eb = null;
+					try {
+						event.getChannel().sendMessage(createEmbedList(page, "All supported " + exchange + " stocks", names, symbols)).get().addReactions("⬅️", "➡️");
+					} catch (InterruptedException | ExecutionException e) {
+						event.getChannel().sendMessage("Error while sending message");
+						e.printStackTrace();
+						return;
+					}
 				}
 			}
 		});
@@ -238,18 +310,22 @@ public class Bot {
 		Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
 			@Override
 			public void run() {
-				File file = new File("servers.settings");
+				saveRegularDict("prefixes.settings", prefixes);
+				saveRegularDict("balances.settings", balances);
+				saveRegularDict("dailyTimestamps.settings", dailyTimestamps);
+				File file = new File("stockOwnerships.settings");
 				System.out.println(file.getAbsolutePath());
 				try {
 					FileWriter fw = new FileWriter(file);
-					for (Map.Entry<String, String> pair: prefixes.entrySet()) {
-						fw.write(pair.getKey() + "\n" + pair.getValue() + "\n");
+					for (Map.Entry<String, ArrayList<String>> pair: stockOwnerships.entrySet()) {
+						fw.write(pair.getKey() + "\n" + pair.getValue().size() + "\n");
+						for (String s: pair.getValue()) fw.write(s + "\n");
 					}
 					fw.close();
 				} catch (IOException e) {
-					System.err.println("Could not write server settings to file!!");
+					System.err.println("Could not write daily timestamps to file!!");
 					e.printStackTrace();
-					System.exit(2);
+					System.exit(3);
 				}
 			}
 		}));
@@ -257,8 +333,8 @@ public class Bot {
 	}
 	private static String getApiJson(String urlStart, String payload, TextChannel channel, String payloadType) {
 		String link = null;
-		if (payloadType.contentEquals("symbol")) link = urlStart + "?symbol=" + payload + "&rapidapi-key=" + Bot.API_KEY;
-		else if (payloadType.contentEquals("exchange")) link = urlStart + "?exchange=" + payload + "&rapidapi-key=" + Bot.API_KEY;
+		if (payloadType.contentEquals("symbol")) link = urlStart + "?symbol=" + payload + "&rapidapi-key=" + Security.API_KEY;
+		else if (payloadType.contentEquals("exchange")) link = urlStart + "?exchange=" + payload + "&rapidapi-key=" + Security.API_KEY;
 		try {
 			URL url = new URL(link);
 			HttpURLConnection connection = (HttpURLConnection) url.openConnection();
@@ -303,6 +379,64 @@ public class Bot {
 			if (key.equals(splitJson[i]) && !useStringProtectingRegex) output.add(splitJson[i+1].replace("\"", ""));
 		}
 		return (String[]) Arrays.copyOf(output.toArray(), output.size(), String[].class);
+	}
+	private static <T> void saveRegularDict(String fileName, Map<String, T> dict) {
+		File file = new File(fileName);
+		System.out.println(file.getAbsolutePath());
+		try {
+			FileWriter fw = new FileWriter(file);
+			for (Map.Entry<String, T> pair: dict.entrySet()) fw.write(pair.getKey() + "\n" + pair.getValue() + "\n");
+			fw.close();
+		} catch (IOException e) {
+			System.err.println("Could not write balances to file!!");
+			e.printStackTrace();
+			System.exit(2);
+		}
+	}
+	private static <T> void readFileToDict(String fileName, Map<String, T> dict, Class<T> clazz) {
+		try {
+			BufferedReader br = new BufferedReader(new FileReader(new File(fileName)));
+			String key = br.readLine(), value;
+			T valueT = null;
+			while (key != null) {
+				value = br.readLine();
+				switch (clazz.toString()) {
+				case "class java.lang.String":
+					valueT = clazz.cast(value);
+					break;
+				case "class java.lang.Integer":
+					valueT = clazz.cast(Integer.parseInt(value));
+					break;
+				case "class java.lang.Double":
+					valueT = clazz.cast(Double.parseDouble(value));
+					break;
+				case "class java.lang.Long":
+					valueT = clazz.cast(Long.parseLong(value));
+					break;
+				}
+				dict.put(key, valueT);
+				key = br.readLine();
+			}
+			br.close();
+		} catch (IOException e) {
+			System.err.println("Error while reading from settings files");
+			e.printStackTrace();
+			System.exit(1);
+		}
+	}
+	private static EmbedBuilder createEmbedList(int page, String title, String[] iterate1, String[] iterate2) {
+		EmbedBuilder eb = new EmbedBuilder();
+		eb.setTitle(title);
+		eb.setColor(Color.BLUE);
+		eb.setFooter("Stock API provided by Finnhub and RapidAPI");
+		eb.setAuthor("Page " + page);
+		if (page < 10) eb.setAuthor("Page 0" + page);
+		StringBuilder s = new StringBuilder();
+		for (int i=50*(page-1);i<50*page && i<iterate1.length;i++) {
+			s.append(iterate1[i] + " | " + iterate2[i] + "\n");
+		}
+		eb.setDescription(new String(s));
+		return eb;
 	}
 
 }
