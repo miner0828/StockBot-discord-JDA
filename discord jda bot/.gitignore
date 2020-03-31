@@ -4,5 +4,8 @@
 # Ignore Gradle build output directory
 build
 
-#ignore configs and security files
+#ignore config files
 *.settings
+
+#ignore security
+Security.java
