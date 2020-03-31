@@ -1,0 +1,1 @@
+StockBot is a currently in-development Discord economy bot written in Java using Javacord. It's main focus is on the stock market- you can buy and sell real stocks that are updated in real time with the help of the Finnhub API. Player info is stored across servers, so no matter what server you access StockBot in your money and shares are the same.
